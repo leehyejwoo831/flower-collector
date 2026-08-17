@@ -1,5 +1,5 @@
+openpyxl
 streamlit
-
 pandas
 requests
-openpyxl
+beautifulsoup4
