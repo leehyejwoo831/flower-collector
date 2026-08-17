@@ -8,8 +8,8 @@ import requests
 import streamlit as st
 import streamlit.components.v1 as components
 
-st.set_page_config(page_title="전국 화원사 정밀 수집기", page_icon="📊", layout="wide")
-st.title("📊 전국 화원사 자동 수집기 (주소 연고성 검증 강화)")
+st.set_page_config(page_title="전국 화원사 수집기", page_icon="🌷", layout="wide")
+st.title("📊 전국 화원사 자동 수집기")
 
 # 서버 환경 변수에서 API 키 불러오기
 NCP_CLIENT_ID = os.getenv("NCP_CLIENT_ID", "")
@@ -29,15 +29,15 @@ col1, col2 = st.columns([1, 1])
 with col1:
     target_region = st.text_input(
         "수집할 지역 입력 (필수)", 
-        value="대구 북구", 
-        placeholder="예: 서울 강남구, 대구 수성구, 부산 해운대구"
+        value="", 
+        placeholder="예:대구 동구, 부산 남구, 단양군"
     )
 
 with col2:
     custom_sub_locations = st.text_input(
-        "세부 지역/동 이름 (선택 - 쉼표 구분)", 
+        "세부 동,읍,면,리 이름 (선택 - 쉼표 구분)", 
         value="", 
-        placeholder="예: 동천동, 산격동, 침산동 (비워두면 자동 진행)"
+        placeholder="예: 동천동, 산격동, 침산동"
     )
 
 UNIVERSAL_KEYWORDS = [
