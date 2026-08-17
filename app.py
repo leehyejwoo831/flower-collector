@@ -22,7 +22,7 @@ with st.sidebar:
     else:
         st.error("⚠️ 서버 환경 변수를 확인해 주세요.")
     st.markdown("---")
-    st.info("💡 동일 상호 타 지역 매장 번호 혼입 방지를 위한 주소 연고성 검증이 추가되었습니다.")
+    st.info("💡 타 지역 번호 차단 및 주소 연고성 엄격 검증 모드가 활성화되어 있습니다.")
 
 col1, col2 = st.columns([1, 1])
 
@@ -30,7 +30,7 @@ with col1:
     target_region = st.text_input(
         "수집할 지역 입력 (필수)", 
         value="", 
-        placeholder="예:대구 동구, 부산 남구, 단양군"
+        placeholder="예: 제주 서귀포시, 대구 동구, 단양군"
     )
 
 with col2:
@@ -57,6 +57,16 @@ USER_AGENTS = [
     "Mozilla/5.0 (Linux; Android 12; Pixel 6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Mobile Safari/537.36"
 ]
 
+# 광역지자체/지역별 유효 지역번호 매핑
+REGION_AREA_CODE_MAP = {
+    "서울": "02",
+    "경기": "031", "인천": "032", "강원": "033",
+    "충북": "043", "충남": "041", "대전": "042", "세종": "044",
+    "경북": "054", "경남": "055", "대구": "053", "부산": "051", "울산": "052",
+    "전북": "063", "전남": "061", "광주": "062",
+    "제주": "064"
+}
+
 def clean_html(text):
     if not text:
         return ""
@@ -68,13 +78,30 @@ def clean_html(text):
         .replace("&quot;", '"')
     )
 
-def format_phone_number(raw):
+def get_allowed_area_codes_for_region(region_str):
+    """입력된 지역 문자열을 바탕으로 해당 지역에서 허용 가능한 전화번호 서두(지역번호/휴대폰/안심번호) 목록 추출"""
+    allowed = ["010", "011", "016", "017", "018", "019", "0507", "0502", "0503", "0504", "0505", "0506", "0508", "15", "16", "18"]
+    
+    # 입력된 지역명에서 해당 도/광역시 지역번호 찾기
+    for reg, code in REGION_AREA_CODE_MAP.items():
+        if reg in region_str:
+            allowed.append(code)
+            
+    # 특정 지역 식별이 안 될 경우 전국 지역번호 전체 허용 (Fallback)
+    if len(allowed) == 16:
+        allowed.extend(list(REGION_AREA_CODE_MAP.values()))
+        
+    return tuple(allowed)
+
+def format_phone_number(raw, allowed_codes=None):
     if not raw:
         return ""
     nums = re.sub(r"[^\d]", "", str(raw))
     
-    if not nums.startswith("0") and not nums.startswith("15") and not nums.startswith("16") and not nums.startswith("18"):
-        return ""
+    # 💡 허용된 지역번호/국번이 아니면 차단 (타 지역 번호 유입 차단 핵심)
+    if allowed_codes:
+        if not any(nums.startswith(code) for code in allowed_codes):
+            return ""
 
     if nums.startswith("050") and len(nums) == 12:
         return f"{nums[:4]}-{nums[4:8]}-{nums[8:]}"
@@ -95,63 +122,76 @@ def format_phone_number(raw):
     return raw
 
 def is_strict_region_match(road_addr, jibun_addr, target_region_str):
-    tokens = [t.strip() for t in target_region_str.strip().split() if t.strip()]
+    if not target_region_str.strip():
+        return True
+        
+    target_tokens = [t.strip() for t in target_region_str.strip().split() if t.strip()]
     full_road = road_addr or ""
     full_jibun = jibun_addr or ""
     
-    match_road = all(token in full_road for token in tokens)
-    match_jibun = all(token in full_jibun for token in tokens)
-    return match_road or match_jibun
+    road_tokens = full_road.split()
+    jibun_tokens = full_jibun.split()
+    
+    def match_single_target(target, tokens, full_text):
+        if any(target.endswith(unit) for unit in ["구", "군", "읍", "면", "동", "리"]):
+            return any(token == target for token in tokens)
+        return target in full_text
+
+    def check_all_targets(tokens, full_text):
+        for target in target_tokens:
+            if not match_single_target(target, tokens, full_text):
+                return False
+        return True
+
+    return check_all_targets(road_tokens, full_road) or check_all_targets(jibun_tokens, full_jibun)
 
 def is_valid_flower_category(category_str):
     if not category_str:
         return True
     return any(keyword in category_str for keyword in ALLOWED_CATEGORIES)
 
-# 💡 [주소 연고성 검증 강화된 모바일 번호 추적 함수]
-def fetch_phone_from_mobile(title, address):
+def fetch_phone_from_mobile(title, address, allowed_codes):
     if not address:
         return ""
 
     addr_tokens = [t.strip() for t in address.split() if t.strip()]
-    
-    # 1. 주소를 검색어 앞에 두어 타 지역 본점 우위 현상 차단
     short_addr = " ".join(addr_tokens[:3]) if len(addr_tokens) >= 3 else address
     search_kw = f"{short_addr} {title}"
 
     url = f"https://m.search.naver.com/search.naver?query={requests.utils.quote(search_kw)}"
-    headers = {
-        "User-Agent": random.choice(USER_AGENTS)
-    }
+    headers = {"User-Agent": random.choice(USER_AGENTS)}
+    
     try:
         time.sleep(random.uniform(0.3, 0.6))
         res = requests.get(url, headers=headers, timeout=4)
         if res.status_code == 200:
             html = res.text
             
-            # 2. 주소 연고성 검증: 구, 동, 도로명 단어가 모바일 검색 페이지에 실제로 있는지 확인
-            # (예: '북구', '동천동' 등이 HTML 페이지 내에 한 번도 나오지 않으면 타 지역 검색 결과로 간주하여 차단)
+            # 주소 연고성 검증
             region_keywords = [
                 t for t in addr_tokens 
                 if len(t) >= 2 and t not in ["대한민국", "서울특별시", "광역시", "특별자치시", "도"]
             ]
             
             if region_keywords and not any(kw in html for kw in region_keywords):
-                return "" # 주소 연고가 없는 타 지역 결과이므로 수집 중단
+                return ""
 
-            # 3. tel: 태그 우선 추출
+            # 1. tel: 태그 우선 추출
             tel_links = re.findall(r'href=["\']tel:([0-9\-\.]+)', html)
             for t in tel_links:
-                formatted = format_phone_number(t)
+                formatted = format_phone_number(t, allowed_codes)
                 if formatted:
                     return formatted
 
-            # 4. 본문 일반 전화번호 패턴 추출
+            # 2. 본문 일반 전화번호 패턴 추출
             pattern = r"(050\d|02|0[3-9]\d|01[016789])[-.)\s]?(\d{3,4})[-.)\s]?(\d{4})"
-            match = re.search(pattern, html)
-            if match:
-                raw_found = f"{match.group(1)}-{match.group(2)}-{match.group(3)}"
-                return format_phone_number(raw_found)
+            matches = re.findall(pattern, html)
+            for match in matches:
+                raw_found = f"{match[0]}-{match[1]}-{match[2]}"
+                formatted = format_phone_number(raw_found, allowed_codes)
+                if formatted:
+                    return formatted
+                    
         elif res.status_code == 429:
             time.sleep(2)
     except Exception:
@@ -179,6 +219,9 @@ if st.button("🚀 선택 지역 전수 수집 시작", type="primary", use_cont
     elif not target_region.strip():
         st.warning("⚠️ 수집할 지역을 입력하세요.")
     else:
+        # 검색 대상 지역의 허용 지역번호 설정 (예: 제주 -> 064, 010, 0507 등만 허용)
+        allowed_codes = get_allowed_area_codes_for_region(target_region)
+        
         url = "https://naverapihub.apigw.ntruss.com/search/v1/local"
         headers = {
             "X-NCP-APIGW-API-KEY-ID": NCP_CLIENT_ID.strip(),
@@ -205,7 +248,7 @@ if st.button("🚀 선택 지역 전수 수집 시작", type="primary", use_cont
                         title = clean_html(item.get("title", ""))
                         road_addr = item.get("roadAddress", "")
                         jibun_addr = item.get("address", "")
-                        tel = format_phone_number(clean_html(item.get("telephone", "")).strip())
+                        tel = format_phone_number(clean_html(item.get("telephone", "")).strip(), allowed_codes)
                         category = item.get("category", "")
 
                         target_addr = road_addr if road_addr else jibun_addr
@@ -238,13 +281,13 @@ if st.button("🚀 선택 지역 전수 수집 시작", type="primary", use_cont
         status_text.empty()
         progress_bar.empty()
 
-        # 전화번호 누락 매장 추가 추적 (주소 연고성 검증 포함)
+        # 전화번호 누락 매장 추가 추적 (해당 지역 허용 번호만 추적)
         missing_shops = [s for s in shops if not s["전화번호"]]
         if missing_shops:
             st.info(f"📞 전화번호 누락 매장 {len(missing_shops)}개 추가 정밀 추적 중...")
             phone_bar = st.progress(0)
             for p_idx, shop in enumerate(missing_shops):
-                found_tel = fetch_phone_from_mobile(shop["상호명"], shop["도로명주소"])
+                found_tel = fetch_phone_from_mobile(shop["상호명"], shop["도로명주소"], allowed_codes)
                 if found_tel:
                     shop["전화번호"] = found_tel
                 phone_bar.progress((p_idx + 1) / len(missing_shops))
